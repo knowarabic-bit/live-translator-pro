@@ -1,6 +1,6 @@
 /**
- * api.js — thin HTTP + WebSocket client for live-translator-pro
- * Replaces the @base44/sdk completely.
+ * api.js — thin HTTP + WebSocket client for live-translator-pro.
+ * Talks to the Express server under /api and a WebSocket at /ws.
  */
 
 const BASE = import.meta.env.VITE_API_URL || '';

@@ -1,6 +1,5 @@
 /**
- * live-translator-pro — Independent Express + WebSocket server
- * Replaces Base44 backend entirely.
+ * live-translator-pro — Independent Express + WebSocket server.
  *
  * Routes:
  *   POST /api/auth/register
@@ -47,7 +46,19 @@ const db = {
 const PORT        = process.env.PORT || 4000;
 const JWT_SECRET  = process.env.JWT_SECRET || 'dev-secret-change-me';
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
-const openai      = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// Lazily construct the OpenAI client so the server still boots if the key is
+// missing — the /api/transcribe route will surface a clear error instead.
+let _openai;
+function getOpenAI() {
+  if (!_openai) {
+    if (!process.env.OPENAI_API_KEY) {
+      throw new Error('OPENAI_API_KEY is not set');
+    }
+    _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  }
+  return _openai;
+}
 
 // ─── Express setup ──────────────────────────────────────────────────────────
 const app    = express();
@@ -278,7 +289,7 @@ app.post('/api/transcribe', requireAuth, upload.single('audio'), async (req, res
     const blob = new Blob([audioBuffer], { type: mimeType });
     const file = new File([blob], `audio.${ext}`, { type: mimeType });
 
-    const response = await openai.audio.transcriptions.create({
+    const response = await getOpenAI().audio.transcriptions.create({
       file,
       model:           'whisper-1',
       response_format: 'verbose_json',

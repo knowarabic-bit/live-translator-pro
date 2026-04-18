@@ -1,7 +1,7 @@
 # Live Translator Pro — Independent Stack
 
 Real-time bilingual translation (EN ⟷ AR) with word-by-word streaming.
-**No Base44. No proprietary BaaS.** Runs entirely on your own infrastructure.
+**No proprietary BaaS.** Runs entirely on your own infrastructure.
 
 ---
 
@@ -41,10 +41,9 @@ Real-time bilingual translation (EN ⟷ AR) with word-by-word streaming.
 
 ### 1. Clone & install
 ```bash
-git clone https://github.com/your-username/live-translator-pro.git
+git clone https://github.com/knowarabic-bit/live-translator-pro.git
 cd live-translator-pro
-cd server && npm install && cd ..
-cd client && npm install && cd ..
+npm install        # installs root + client + server workspaces
 ```
 
 ### 2. Configure environment variables
@@ -66,12 +65,14 @@ VITE_WS_URL=ws://localhost:4000
 ```
 
 ### 3. Run in development
+From the repo root:
 ```bash
-# Terminal 1
-cd server && npm run dev
-
-# Terminal 2
-cd client && npm run dev
+npm run dev        # starts server (4000) + client (5173) in parallel
+```
+…or run them separately:
+```bash
+npm run dev --workspace=server
+npm run dev --workspace=client
 ```
 Open **http://localhost:5173**
 
@@ -126,7 +127,7 @@ live-translator-pro/
 │
 └── client/
     ├── src/
-    │   ├── api/api.js              ← HTTP + WebSocket client (replaces base44)
+    │   ├── api/api.js              ← HTTP + WebSocket client
     │   ├── lib/AuthContext.jsx     ← JWT auth context
     │   ├── pages/
     │   │   ├── AuthPage.jsx        ← Login / Register
