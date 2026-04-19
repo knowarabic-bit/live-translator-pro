@@ -1,6 +1,6 @@
 # Live Translator Pro — Independent Stack
 
-Real-time bilingual translation (EN ⟷ AR) with word-by-word streaming.
+Real-time **English → Arabic** translation with word-by-word streaming.
 **No proprietary BaaS.** Runs entirely on your own infrastructure.
 
 ---
@@ -22,18 +22,15 @@ Real-time bilingual translation (EN ⟷ AR) with word-by-word streaming.
 │  /api/auth/*          JWT + bcrypt                   │
 │  /api/sessions/*      In-memory store (swap → DB)    │
 │  /api/transcribe      OpenAI Whisper-1               │
-│  /api/translate       DeepL (EN→AR) / Google (AR→EN) │
+│  /api/translate       DeepL (EN → AR only)           │
 │  /api/sessions/:id/export-pdf   PDFKit               │
 │  WebSocket /ws        Rooms by sessionId             │
 └──────────────────────────────────────────────────────┘
 ```
 
-### Translation Routing (Hybrid Logic)
-| Direction | Engine        | Reason                          |
-|-----------|---------------|---------------------------------|
-| EN → AR   | **DeepL**     | Best formal Arabic output       |
-| AR → EN   | **Google** (DeepL fallback) | Better Arabic source handling |
-| Other     | **Google** (DeepL fallback) | General language pairs  |
+### Translation
+Only **English → Arabic** is supported. Whisper transcribes; DeepL translates.
+Non-English audio is transcribed but not translated.
 
 ---
 
@@ -52,7 +49,6 @@ npm install        # installs root + client + server workspaces
 ```env
 OPENAI_API_KEY=sk-...
 DEEPL_API_KEY=...          # ends with :fx for the free plan
-GOOGLE_API_KEY=AIza...
 JWT_SECRET=change-me-to-a-long-random-string
 PORT=4000
 CLIENT_ORIGIN=http://localhost:5173
@@ -84,7 +80,6 @@ Open **http://localhost:5173**
 |------------------|-----------------|
 | OPENAI_API_KEY   | https://platform.openai.com/api-keys |
 | DEEPL_API_KEY    | https://www.deepl.com/pro-api (500k chars/month free) |
-| GOOGLE_API_KEY   | https://console.cloud.google.com → Cloud Translation API |
 
 ---
 

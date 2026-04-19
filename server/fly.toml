@@ -1,0 +1,26 @@
+# fly.toml for the live-translator-pro Express server.
+# Deploy from this directory: `cd server && fly deploy`.
+
+app = "live-translator-pro"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "4000"
+  CLIENT_ORIGIN = "*"
+
+[http_service]
+  internal_port = 4000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512

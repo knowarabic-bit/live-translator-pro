@@ -15,7 +15,7 @@
  *   POST /api/sessions/:id/entries   create entry (internal, used by workers)
  *
  *   POST /api/transcribe          upload audio → Whisper → text + events
- *   POST /api/translate           text → DeepL or Google
+ *   POST /api/translate           text → DeepL (EN → AR only)
  *   GET  /api/sessions/:id/export-pdf
  *
  * WebSocket  ws://host:PORT/ws?token=JWT&sessionId=ID
@@ -45,7 +45,17 @@ const db = {
 // ─── Config ─────────────────────────────────────────────────────────────────
 const PORT        = process.env.PORT || 4000;
 const JWT_SECRET  = process.env.JWT_SECRET || 'dev-secret-change-me';
+// Comma-separated list of allowed browser origins. '*' allows any origin
+// (but CORS credentials require reflecting the request origin, so we do
+// that instead of returning a literal '*').
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
+const allowedOrigins = CLIENT_ORIGIN.split(',').map((s) => s.trim()).filter(Boolean);
+const corsOrigin = allowedOrigins.includes('*')
+  ? true                                        // reflect request origin
+  : (origin, cb) => {
+      if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+      return cb(new Error(`Origin ${origin} not allowed by CORS`));
+    };
 
 // Lazily construct the OpenAI client so the server still boots if the key is
 // missing — the /api/transcribe route will surface a clear error instead.
@@ -64,7 +74,7 @@ function getOpenAI() {
 const app    = express();
 const server = createServer(app);
 
-app.use(cors({ origin: CLIENT_ORIGIN, credentials: true }));
+app.use(cors({ origin: corsOrigin, credentials: true }));
 app.use(express.json({ limit: '50mb' }));
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
@@ -328,6 +338,7 @@ app.post('/api/transcribe', requireAuth, upload.single('audio'), async (req, res
 // ═══════════════════════════════════════════════════════════════════════════
 // TRANSLATION  — POST /api/translate
 // Body: { text, source_lang, target_lang }
+// EN → AR only, via DeepL.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const GLOSSARY = {
@@ -350,21 +361,24 @@ function applyGlossary(text) {
 }
 
 async function translateWithDeepL(text, sourceLang, targetLang) {
-  const key         = process.env.DEEPL_API_KEY;
-  const isFreePlan  = key?.endsWith(':fx');
-  const apiUrl      = isFreePlan
+  const key = process.env.DEEPL_API_KEY;
+  if (!key) throw new Error('DEEPL_API_KEY is not set');
+  const isFreePlan = key.endsWith(':fx');
+  const apiUrl     = isFreePlan
     ? 'https://api-free.deepl.com/v2/translate'
     : 'https://api.deepl.com/v2/translate';
 
-  const formalitySupported = ['DE','FR','ES','IT','NL','PL','PT','RU'];
-  const targetUpper        = targetLang.toUpperCase();
-  const body               = new URLSearchParams({ text, target_lang: targetUpper });
-  if (formalitySupported.some((l) => targetUpper.startsWith(l))) body.append('formality','more');
-  if (sourceLang && /^[a-zA-Z]{2}$/.test(sourceLang)) body.append('source_lang', sourceLang.toUpperCase());
+  const body = new URLSearchParams({ text, target_lang: targetLang.toUpperCase() });
+  if (sourceLang && /^[a-zA-Z]{2}$/.test(sourceLang)) {
+    body.append('source_lang', sourceLang.toUpperCase());
+  }
 
   const r = await fetch(apiUrl, {
-    method: 'POST',
-    headers: { Authorization: `DeepL-Auth-Key ${key}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    method:  'POST',
+    headers: {
+      Authorization:  `DeepL-Auth-Key ${key}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
     body: body.toString(),
   });
   if (!r.ok) throw new Error(`DeepL ${r.status}: ${await r.text()}`);
@@ -376,22 +390,6 @@ async function translateWithDeepL(text, sourceLang, targetLang) {
   };
 }
 
-async function translateWithGoogle(text, sourceLang, targetLang) {
-  const key = process.env.GOOGLE_API_KEY;
-  const r   = await fetch(`https://translation.googleapis.com/language/translate/v2?key=${key}`, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ q: text, source: sourceLang || undefined, target: targetLang, format: 'text' }),
-  });
-  if (!r.ok) throw new Error(`Google ${r.status}: ${await r.text()}`);
-  const data = await r.json();
-  return {
-    translated_text:   data.data.translations[0].translatedText,
-    detected_language: data.data.translations[0].detectedSourceLanguage?.toLowerCase() || sourceLang,
-    engine:            'google',
-  };
-}
-
 app.post('/api/translate', requireAuth, async (req, res) => {
   try {
     const { text, source_lang, target_lang } = req.body;
@@ -399,18 +397,15 @@ app.post('/api/translate', requireAuth, async (req, res) => {
 
     const src = (source_lang || '').toLowerCase();
     const tgt = (target_lang || '').toLowerCase();
-    let result;
 
-    if (src === 'en' && tgt === 'ar') {
-      result = await translateWithDeepL(text, source_lang, 'AR');
-    } else if (src === 'ar' && tgt === 'en') {
-      try   { result = await translateWithGoogle(text, source_lang, tgt); }
-      catch { result = await translateWithDeepL(text, source_lang, 'EN'); result.engine = 'deepl-fallback'; }
-    } else {
-      try   { result = await translateWithGoogle(text, source_lang, tgt); }
-      catch { result = await translateWithDeepL(text, source_lang, tgt.toUpperCase()); result.engine = 'deepl-fallback'; }
+    // Only English → Arabic is supported.
+    if (tgt !== 'ar' || (src && src !== 'en')) {
+      return res.status(400).json({
+        error: 'Only English → Arabic translation is supported',
+      });
     }
 
+    const result = await translateWithDeepL(text, 'EN', 'AR');
     result.translated_text = applyGlossary(result.translated_text);
     res.json(result);
   } catch (err) {

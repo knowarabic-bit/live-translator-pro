@@ -180,7 +180,7 @@ export default function SessionRoom() {
           {entries.filter(e => !e.event_type).length} segments transcribed
         </span>
         <span className="text-slate-600 text-xs">
-          EN ⟷ AR · Whisper + DeepL / Google
+          EN → AR · Whisper + DeepL
         </span>
       </div>
     </div>
