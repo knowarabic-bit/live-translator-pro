@@ -34,6 +34,7 @@ import jwt from 'jsonwebtoken';
 import multer from 'multer';
 import OpenAI from 'openai';
 import PDFDocument from 'pdfkit';
+import { Resend } from 'resend';
 
 // ─── In-memory store (swap for PostgreSQL/SQLite in prod) ───────────────────
 const db = {
@@ -87,11 +88,20 @@ const rooms = new Map();
 wss.on('connection', (ws, req) => {
   const params    = new URL(req.url, `http://localhost`).searchParams;
   const token     = params.get('token');
+  const code      = params.get('code');
   const sessionId = params.get('sessionId');
 
-  try {
-    jwt.verify(token, JWT_SECRET); // throws if invalid
-  } catch {
+  // Accept either a JWT (host/registered participant) or an access_code that
+  // matches the sessionId — lets anyone with the share link watch live.
+  let authed = false;
+  if (token) {
+    try { jwt.verify(token, JWT_SECRET); authed = true; } catch { /* fallthrough */ }
+  }
+  if (!authed && code && sessionId) {
+    const session = db.sessions.get(sessionId);
+    if (session && session.access_code === code.toUpperCase()) authed = true;
+  }
+  if (!authed) {
     ws.close(4001, 'Unauthorized');
     return;
   }
@@ -210,6 +220,42 @@ app.post('/api/sessions/join', requireAuth, (req, res) => {
   session.participant_count = (session.participant_count || 1) + 1;
   broadcast(session.id, { type: 'session_update', data: session });
   res.json(session);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PUBLIC GUEST VIEWER — anyone with the access code can watch the translation
+// feed live, no account required.
+// ═══════════════════════════════════════════════════════════════════════════
+
+function publicSessionView(session) {
+  return {
+    id:                session.id,
+    title:             session.title,
+    status:            session.status,
+    access_code:       session.access_code,
+    participant_count: session.participant_count,
+    source_language:   session.source_language,
+    target_language:   session.target_language,
+    created_at:        session.created_at,
+  };
+}
+
+app.get('/api/public/sessions/by-code/:code', (req, res) => {
+  const code = (req.params.code || '').toUpperCase();
+  const session = [...db.sessions.values()].find((s) => s.access_code === code);
+  if (!session) return res.status(404).json({ error: 'Invalid access code' });
+  session.participant_count = (session.participant_count || 1) + 1;
+  broadcast(session.id, { type: 'session_update', data: session });
+  res.json(publicSessionView(session));
+});
+
+app.get('/api/public/sessions/:id/entries', (req, res) => {
+  const code = (req.query.code || '').toString().toUpperCase();
+  const session = db.sessions.get(req.params.id);
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  if (session.access_code !== code) return res.status(403).json({ error: 'Invalid access code' });
+  const entries = (db.entries.get(req.params.id) || []).sort((a, b) => a.sequence - b.sequence);
+  res.json(entries);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -415,36 +461,106 @@ app.post('/api/translate', requireAuth, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// PDF EXPORT  — GET /api/sessions/:id/export-pdf
+// PDF EXPORT  — translation first, original transcript appendix at the end
 // ═══════════════════════════════════════════════════════════════════════════
+
+function buildPdf(session, entries) {
+  const doc = new PDFDocument({ margin: 50, size: 'A4' });
+
+  doc.fontSize(20).fillColor('#000').text(session.title, { align: 'center' });
+  doc.moveDown(0.25);
+  doc.fontSize(10).fillColor('#666')
+    .text(`Session ID: ${session.id}  ·  ${session.created_at}`, { align: 'center' });
+  doc.moveDown(1);
+
+  // ── Translation (Arabic) — main body ───────────────────────────────────
+  doc.fontSize(14).fillColor('#000').text('Translation (Arabic)', { underline: true });
+  doc.moveDown(0.5);
+  for (const entry of entries) {
+    if (entry.event_type) {
+      doc.fontSize(10).fillColor('#888').text(`[${entry.original_text}]`);
+    } else if (entry.translated_text) {
+      doc.fontSize(11).fillColor('#000').text(entry.translated_text, { align: 'right' });
+    }
+    doc.moveDown(0.35);
+  }
+
+  // ── Original transcript appendix ───────────────────────────────────────
+  doc.addPage();
+  doc.fontSize(14).fillColor('#000').text('Original Transcript (English)', { underline: true });
+  doc.moveDown(0.5);
+  for (const entry of entries) {
+    if (entry.event_type) {
+      doc.fontSize(10).fillColor('#888').text(`[${entry.original_text}]`);
+    } else if (entry.original_text) {
+      doc.fontSize(11).fillColor('#000').text(entry.original_text);
+    }
+    doc.moveDown(0.35);
+  }
+
+  doc.end();
+  return doc;
+}
+
+function collectPdfBuffer(session, entries) {
+  return new Promise((resolve, reject) => {
+    const doc = buildPdf(session, entries);
+    const chunks = [];
+    doc.on('data', (c) => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+  });
+}
 
 app.get('/api/sessions/:id/export-pdf', requireAuth, (req, res) => {
   const session = db.sessions.get(req.params.id);
   if (!session) return res.status(404).json({ error: 'Session not found' });
-  const entries = (db.entries.get(req.params.id) || []).sort((a,b)=>a.sequence-b.sequence);
+  const entries = (db.entries.get(req.params.id) || []).sort((a, b) => a.sequence - b.sequence);
 
-  const doc = new PDFDocument({ margin: 50, size: 'A4' });
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="session-${session.id}.pdf"`);
+  const doc = buildPdf(session, entries);
   doc.pipe(res);
+});
 
-  doc.fontSize(20).text(session.title, { align: 'center' });
-  doc.moveDown(0.5);
-  doc.fontSize(10).fillColor('#666').text(`Session ID: ${session.id}  ·  ${session.created_at}`, { align: 'center' });
-  doc.moveDown(1);
+// Email the PDF to the host (or a user-provided address).
+app.post('/api/sessions/:id/email-pdf', requireAuth, async (req, res) => {
+  try {
+    const session = db.sessions.get(req.params.id);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    if (session.host_email !== req.user.email)
+      return res.status(403).json({ error: 'Only the host can email the transcript' });
 
-  for (const entry of entries) {
-    if (entry.event_type) {
-      doc.fontSize(10).fillColor('#888').text(`[${entry.original_text}]`);
-    } else {
-      doc.fontSize(11).fillColor('#000').text(`[${(entry.detected_language || '').toUpperCase()}] ${entry.original_text}`);
-      if (entry.translated_text) {
-        doc.fontSize(10).fillColor('#444').text(`  → [${(entry.target_language || '').toUpperCase()}] ${entry.translated_text}`);
-      }
-    }
-    doc.moveDown(0.4);
+    const to = (req.body?.to || req.user.email || '').trim();
+    if (!to) return res.status(400).json({ error: 'recipient email required' });
+
+    if (!process.env.RESEND_API_KEY)
+      return res.status(503).json({ error: 'Email is not configured (RESEND_API_KEY missing)' });
+
+    const entries = (db.entries.get(session.id) || []).sort((a, b) => a.sequence - b.sequence);
+    const pdfBuffer = await collectPdfBuffer(session, entries);
+
+    const resend = new Resend(process.env.RESEND_API_KEY);
+    const from = process.env.RESEND_FROM || 'Live Translator Pro <onboarding@resend.dev>';
+    const subject = `Transcript: ${session.title}`;
+    const text = `Your transcript from "${session.title}" is attached.\n\n` +
+                 `Session ID: ${session.id}\n` +
+                 `Created: ${session.created_at}\n` +
+                 `Segments: ${entries.filter((e) => !e.event_type).length}\n`;
+
+    const { data, error } = await resend.emails.send({
+      from, to, subject, text,
+      attachments: [{
+        filename: `session-${session.id}.pdf`,
+        content:  pdfBuffer.toString('base64'),
+      }],
+    });
+    if (error) return res.status(502).json({ error: error.message || 'Email send failed' });
+    res.json({ ok: true, id: data?.id, to });
+  } catch (err) {
+    console.error('[/api/sessions/:id/email-pdf]', err);
+    res.status(500).json({ error: err.message });
   }
-  doc.end();
 });
 
 // ─── Start ──────────────────────────────────────────────────────────────────

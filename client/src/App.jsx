@@ -1,8 +1,9 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './lib/AuthContext';
-import AuthPage     from './pages/AuthPage';
-import Dashboard    from './pages/Dashboard';
-import SessionRoom  from './pages/SessionRoom';
+import AuthPage      from './pages/AuthPage';
+import Dashboard     from './pages/Dashboard';
+import SessionRoom   from './pages/SessionRoom';
+import PublicViewer  from './pages/PublicViewer';
 import { Loader2 } from 'lucide-react';
 
 function RequireAuth({ children }) {
@@ -19,6 +20,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/auth" element={<AuthPage />} />
+      <Route path="/s/:code" element={<PublicViewer />} />
       <Route path="/" element={<RequireAuth><Dashboard /></RequireAuth>} />
       <Route path="/session/:id" element={<RequireAuth><SessionRoom /></RequireAuth>} />
       <Route path="*" element={<Navigate to="/" replace />} />

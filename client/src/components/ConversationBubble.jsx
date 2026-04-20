@@ -45,10 +45,11 @@ const EVENT_ICONS = {
 };
 
 // ─── Main bubble ─────────────────────────────────────────────────────────────
+// The live view only shows the translation (Arabic). The original text is
+// preserved in the entry payload so it can be included in the exported PDF
+// appendix, but never rendered on-screen.
 const ConversationBubble = memo(function ConversationBubble({ entry, isActive }) {
-  const isArabic = entry?.detected_language === 'ar';
-
-  // Non-speech event pill
+  // Non-speech event pill — kept because it's language-neutral feedback.
   if (entry?.event_type) {
     return (
       <motion.div
@@ -65,6 +66,9 @@ const ConversationBubble = memo(function ConversationBubble({ entry, isActive })
     );
   }
 
+  // Skip bubbles that somehow have no translatable content.
+  if (entry?.translated_text === undefined) return null;
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 12 }}
@@ -73,59 +77,29 @@ const ConversationBubble = memo(function ConversationBubble({ entry, isActive })
       transition={{ duration: 0.35, ease: 'easeOut' }}
       className="flex flex-col gap-2"
     >
-      {/* ── Original ── */}
-      <div
-        className={`max-w-[80%] px-5 py-3 rounded-2xl ${
-          isArabic
-            ? 'self-end bg-violet-500/10 border border-violet-500/20 rounded-br-sm'
-            : 'self-start bg-cyan-500/10 border border-cyan-500/20 rounded-bl-sm'
-        }`}
-        dir={isArabic ? 'rtl' : 'ltr'}
-      >
-        <p className={`text-white text-sm leading-relaxed ${isArabic ? 'font-cairo' : 'font-inter'}`}>
-          <WordStream
-            text={entry?.original_text ?? ''}
-            isActive={isActive}
-            wordDelay={isArabic ? 90 : 80}
-          />
-        </p>
-        <span className={`text-xs mt-1 block ${isArabic ? 'text-violet-400 text-right' : 'text-cyan-400'}`}>
-          {(entry?.detected_language ?? '').toUpperCase()} · original
-        </span>
-      </div>
-
-      {/* ── Translation: null = pending, string = done ── */}
-      {entry?.translated_text === null ? (
-        // Pending spinner
-        <div className={`max-w-[80%] px-5 py-3 rounded-2xl bg-slate-800/40 border border-slate-700/30 ${
-          isArabic ? 'self-start rounded-tl-sm' : 'self-end rounded-tr-sm'
-        }`}>
+      {entry.translated_text === null ? (
+        // Pending — translation in flight
+        <div className="self-end max-w-[80%] px-5 py-3 rounded-2xl bg-slate-800/40 border border-slate-700/30 rounded-tr-sm">
           <div className="flex items-center gap-2">
             {[0, 150, 300].map((d) => (
-              <div key={d} className="w-1.5 h-1.5 rounded-full bg-cyan-500/60 animate-bounce"
+              <div key={d} className="w-1.5 h-1.5 rounded-full bg-violet-500/60 animate-bounce"
                 style={{ animationDelay: `${d}ms` }} />
             ))}
-            <span className="text-xs text-slate-600 ml-1">Translating…</span>
+            <span className="text-xs text-slate-500 ml-1 font-cairo">جارٍ الترجمة…</span>
           </div>
         </div>
-      ) : entry?.translated_text ? (
-        // Done — stream translation word-by-word
+      ) : entry.translated_text ? (
         <div
-          className={`max-w-[80%] px-5 py-3 rounded-2xl bg-slate-800/60 border border-slate-700/50 ${
-            isArabic ? 'self-start rounded-tl-sm' : 'self-end rounded-tr-sm'
-          }`}
-          dir={isArabic ? 'ltr' : 'rtl'}
+          className="self-end max-w-[80%] px-5 py-3 rounded-2xl bg-violet-500/10 border border-violet-500/20 rounded-br-sm"
+          dir="rtl"
         >
-          <p className={`text-slate-200 text-sm leading-relaxed ${isArabic ? 'font-inter' : 'font-cairo'}`}>
+          <p className="text-white text-base leading-relaxed font-cairo">
             <WordStream
               text={entry.translated_text}
               isActive={isActive}
-              wordDelay={isArabic ? 70 : 85}
+              wordDelay={70}
             />
           </p>
-          <span className={`text-xs mt-1 block text-slate-500 ${isArabic ? '' : 'text-right'}`}>
-            {(entry?.target_language ?? '').toUpperCase()} · translation
-          </span>
         </div>
       ) : null}
     </motion.div>
