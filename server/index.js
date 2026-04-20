@@ -1,6 +1,5 @@
 /**
- * live-translator-pro — Independent Express + WebSocket server
- * Replaces Base44 backend entirely.
+ * live-translator-pro — Independent Express + WebSocket server.
  *
  * Routes:
  *   POST /api/auth/register
@@ -16,7 +15,7 @@
  *   POST /api/sessions/:id/entries   create entry (internal, used by workers)
  *
  *   POST /api/transcribe          upload audio → Whisper → text + events
- *   POST /api/translate           text → DeepL or Google
+ *   POST /api/translate           text → DeepL (EN → AR only)
  *   GET  /api/sessions/:id/export-pdf
  *
  * WebSocket  ws://host:PORT/ws?token=JWT&sessionId=ID
@@ -35,6 +34,7 @@ import jwt from 'jsonwebtoken';
 import multer from 'multer';
 import OpenAI from 'openai';
 import PDFDocument from 'pdfkit';
+import { Resend } from 'resend';
 
 // ─── In-memory store (swap for PostgreSQL/SQLite in prod) ───────────────────
 const db = {
@@ -46,14 +46,36 @@ const db = {
 // ─── Config ─────────────────────────────────────────────────────────────────
 const PORT        = process.env.PORT || 4000;
 const JWT_SECRET  = process.env.JWT_SECRET || 'dev-secret-change-me';
+// Comma-separated list of allowed browser origins. '*' allows any origin
+// (but CORS credentials require reflecting the request origin, so we do
+// that instead of returning a literal '*').
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
-const openai      = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const allowedOrigins = CLIENT_ORIGIN.split(',').map((s) => s.trim()).filter(Boolean);
+const corsOrigin = allowedOrigins.includes('*')
+  ? true                                        // reflect request origin
+  : (origin, cb) => {
+      if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+      return cb(new Error(`Origin ${origin} not allowed by CORS`));
+    };
+
+// Lazily construct the OpenAI client so the server still boots if the key is
+// missing — the /api/transcribe route will surface a clear error instead.
+let _openai;
+function getOpenAI() {
+  if (!_openai) {
+    if (!process.env.OPENAI_API_KEY) {
+      throw new Error('OPENAI_API_KEY is not set');
+    }
+    _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  }
+  return _openai;
+}
 
 // ─── Express setup ──────────────────────────────────────────────────────────
 const app    = express();
 const server = createServer(app);
 
-app.use(cors({ origin: CLIENT_ORIGIN, credentials: true }));
+app.use(cors({ origin: corsOrigin, credentials: true }));
 app.use(express.json({ limit: '50mb' }));
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
@@ -66,11 +88,20 @@ const rooms = new Map();
 wss.on('connection', (ws, req) => {
   const params    = new URL(req.url, `http://localhost`).searchParams;
   const token     = params.get('token');
+  const code      = params.get('code');
   const sessionId = params.get('sessionId');
 
-  try {
-    jwt.verify(token, JWT_SECRET); // throws if invalid
-  } catch {
+  // Accept either a JWT (host/registered participant) or an access_code that
+  // matches the sessionId — lets anyone with the share link watch live.
+  let authed = false;
+  if (token) {
+    try { jwt.verify(token, JWT_SECRET); authed = true; } catch { /* fallthrough */ }
+  }
+  if (!authed && code && sessionId) {
+    const session = db.sessions.get(sessionId);
+    if (session && session.access_code === code.toUpperCase()) authed = true;
+  }
+  if (!authed) {
     ws.close(4001, 'Unauthorized');
     return;
   }
@@ -192,6 +223,42 @@ app.post('/api/sessions/join', requireAuth, (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// PUBLIC GUEST VIEWER — anyone with the access code can watch the translation
+// feed live, no account required.
+// ═══════════════════════════════════════════════════════════════════════════
+
+function publicSessionView(session) {
+  return {
+    id:                session.id,
+    title:             session.title,
+    status:            session.status,
+    access_code:       session.access_code,
+    participant_count: session.participant_count,
+    source_language:   session.source_language,
+    target_language:   session.target_language,
+    created_at:        session.created_at,
+  };
+}
+
+app.get('/api/public/sessions/by-code/:code', (req, res) => {
+  const code = (req.params.code || '').toUpperCase();
+  const session = [...db.sessions.values()].find((s) => s.access_code === code);
+  if (!session) return res.status(404).json({ error: 'Invalid access code' });
+  session.participant_count = (session.participant_count || 1) + 1;
+  broadcast(session.id, { type: 'session_update', data: session });
+  res.json(publicSessionView(session));
+});
+
+app.get('/api/public/sessions/:id/entries', (req, res) => {
+  const code = (req.query.code || '').toString().toUpperCase();
+  const session = db.sessions.get(req.params.id);
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  if (session.access_code !== code) return res.status(403).json({ error: 'Invalid access code' });
+  const entries = (db.entries.get(req.params.id) || []).sort((a, b) => a.sequence - b.sequence);
+  res.json(entries);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // ENTRIES ROUTES
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -278,7 +345,7 @@ app.post('/api/transcribe', requireAuth, upload.single('audio'), async (req, res
     const blob = new Blob([audioBuffer], { type: mimeType });
     const file = new File([blob], `audio.${ext}`, { type: mimeType });
 
-    const response = await openai.audio.transcriptions.create({
+    const response = await getOpenAI().audio.transcriptions.create({
       file,
       model:           'whisper-1',
       response_format: 'verbose_json',
@@ -317,6 +384,7 @@ app.post('/api/transcribe', requireAuth, upload.single('audio'), async (req, res
 // ═══════════════════════════════════════════════════════════════════════════
 // TRANSLATION  — POST /api/translate
 // Body: { text, source_lang, target_lang }
+// EN → AR only, via DeepL.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const GLOSSARY = {
@@ -339,21 +407,24 @@ function applyGlossary(text) {
 }
 
 async function translateWithDeepL(text, sourceLang, targetLang) {
-  const key         = process.env.DEEPL_API_KEY;
-  const isFreePlan  = key?.endsWith(':fx');
-  const apiUrl      = isFreePlan
+  const key = process.env.DEEPL_API_KEY;
+  if (!key) throw new Error('DEEPL_API_KEY is not set');
+  const isFreePlan = key.endsWith(':fx');
+  const apiUrl     = isFreePlan
     ? 'https://api-free.deepl.com/v2/translate'
     : 'https://api.deepl.com/v2/translate';
 
-  const formalitySupported = ['DE','FR','ES','IT','NL','PL','PT','RU'];
-  const targetUpper        = targetLang.toUpperCase();
-  const body               = new URLSearchParams({ text, target_lang: targetUpper });
-  if (formalitySupported.some((l) => targetUpper.startsWith(l))) body.append('formality','more');
-  if (sourceLang && /^[a-zA-Z]{2}$/.test(sourceLang)) body.append('source_lang', sourceLang.toUpperCase());
+  const body = new URLSearchParams({ text, target_lang: targetLang.toUpperCase() });
+  if (sourceLang && /^[a-zA-Z]{2}$/.test(sourceLang)) {
+    body.append('source_lang', sourceLang.toUpperCase());
+  }
 
   const r = await fetch(apiUrl, {
-    method: 'POST',
-    headers: { Authorization: `DeepL-Auth-Key ${key}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    method:  'POST',
+    headers: {
+      Authorization:  `DeepL-Auth-Key ${key}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
     body: body.toString(),
   });
   if (!r.ok) throw new Error(`DeepL ${r.status}: ${await r.text()}`);
@@ -365,22 +436,6 @@ async function translateWithDeepL(text, sourceLang, targetLang) {
   };
 }
 
-async function translateWithGoogle(text, sourceLang, targetLang) {
-  const key = process.env.GOOGLE_API_KEY;
-  const r   = await fetch(`https://translation.googleapis.com/language/translate/v2?key=${key}`, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ q: text, source: sourceLang || undefined, target: targetLang, format: 'text' }),
-  });
-  if (!r.ok) throw new Error(`Google ${r.status}: ${await r.text()}`);
-  const data = await r.json();
-  return {
-    translated_text:   data.data.translations[0].translatedText,
-    detected_language: data.data.translations[0].detectedSourceLanguage?.toLowerCase() || sourceLang,
-    engine:            'google',
-  };
-}
-
 app.post('/api/translate', requireAuth, async (req, res) => {
   try {
     const { text, source_lang, target_lang } = req.body;
@@ -388,18 +443,15 @@ app.post('/api/translate', requireAuth, async (req, res) => {
 
     const src = (source_lang || '').toLowerCase();
     const tgt = (target_lang || '').toLowerCase();
-    let result;
 
-    if (src === 'en' && tgt === 'ar') {
-      result = await translateWithDeepL(text, source_lang, 'AR');
-    } else if (src === 'ar' && tgt === 'en') {
-      try   { result = await translateWithGoogle(text, source_lang, tgt); }
-      catch { result = await translateWithDeepL(text, source_lang, 'EN'); result.engine = 'deepl-fallback'; }
-    } else {
-      try   { result = await translateWithGoogle(text, source_lang, tgt); }
-      catch { result = await translateWithDeepL(text, source_lang, tgt.toUpperCase()); result.engine = 'deepl-fallback'; }
+    // Only English → Arabic is supported.
+    if (tgt !== 'ar' || (src && src !== 'en')) {
+      return res.status(400).json({
+        error: 'Only English → Arabic translation is supported',
+      });
     }
 
+    const result = await translateWithDeepL(text, 'EN', 'AR');
     result.translated_text = applyGlossary(result.translated_text);
     res.json(result);
   } catch (err) {
@@ -409,36 +461,106 @@ app.post('/api/translate', requireAuth, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// PDF EXPORT  — GET /api/sessions/:id/export-pdf
+// PDF EXPORT  — translation first, original transcript appendix at the end
 // ═══════════════════════════════════════════════════════════════════════════
+
+function buildPdf(session, entries) {
+  const doc = new PDFDocument({ margin: 50, size: 'A4' });
+
+  doc.fontSize(20).fillColor('#000').text(session.title, { align: 'center' });
+  doc.moveDown(0.25);
+  doc.fontSize(10).fillColor('#666')
+    .text(`Session ID: ${session.id}  ·  ${session.created_at}`, { align: 'center' });
+  doc.moveDown(1);
+
+  // ── Translation (Arabic) — main body ───────────────────────────────────
+  doc.fontSize(14).fillColor('#000').text('Translation (Arabic)', { underline: true });
+  doc.moveDown(0.5);
+  for (const entry of entries) {
+    if (entry.event_type) {
+      doc.fontSize(10).fillColor('#888').text(`[${entry.original_text}]`);
+    } else if (entry.translated_text) {
+      doc.fontSize(11).fillColor('#000').text(entry.translated_text, { align: 'right' });
+    }
+    doc.moveDown(0.35);
+  }
+
+  // ── Original transcript appendix ───────────────────────────────────────
+  doc.addPage();
+  doc.fontSize(14).fillColor('#000').text('Original Transcript (English)', { underline: true });
+  doc.moveDown(0.5);
+  for (const entry of entries) {
+    if (entry.event_type) {
+      doc.fontSize(10).fillColor('#888').text(`[${entry.original_text}]`);
+    } else if (entry.original_text) {
+      doc.fontSize(11).fillColor('#000').text(entry.original_text);
+    }
+    doc.moveDown(0.35);
+  }
+
+  doc.end();
+  return doc;
+}
+
+function collectPdfBuffer(session, entries) {
+  return new Promise((resolve, reject) => {
+    const doc = buildPdf(session, entries);
+    const chunks = [];
+    doc.on('data', (c) => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+  });
+}
 
 app.get('/api/sessions/:id/export-pdf', requireAuth, (req, res) => {
   const session = db.sessions.get(req.params.id);
   if (!session) return res.status(404).json({ error: 'Session not found' });
-  const entries = (db.entries.get(req.params.id) || []).sort((a,b)=>a.sequence-b.sequence);
+  const entries = (db.entries.get(req.params.id) || []).sort((a, b) => a.sequence - b.sequence);
 
-  const doc = new PDFDocument({ margin: 50, size: 'A4' });
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="session-${session.id}.pdf"`);
+  const doc = buildPdf(session, entries);
   doc.pipe(res);
+});
 
-  doc.fontSize(20).text(session.title, { align: 'center' });
-  doc.moveDown(0.5);
-  doc.fontSize(10).fillColor('#666').text(`Session ID: ${session.id}  ·  ${session.created_at}`, { align: 'center' });
-  doc.moveDown(1);
+// Email the PDF to the host (or a user-provided address).
+app.post('/api/sessions/:id/email-pdf', requireAuth, async (req, res) => {
+  try {
+    const session = db.sessions.get(req.params.id);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    if (session.host_email !== req.user.email)
+      return res.status(403).json({ error: 'Only the host can email the transcript' });
 
-  for (const entry of entries) {
-    if (entry.event_type) {
-      doc.fontSize(10).fillColor('#888').text(`[${entry.original_text}]`);
-    } else {
-      doc.fontSize(11).fillColor('#000').text(`[${(entry.detected_language || '').toUpperCase()}] ${entry.original_text}`);
-      if (entry.translated_text) {
-        doc.fontSize(10).fillColor('#444').text(`  → [${(entry.target_language || '').toUpperCase()}] ${entry.translated_text}`);
-      }
-    }
-    doc.moveDown(0.4);
+    const to = (req.body?.to || req.user.email || '').trim();
+    if (!to) return res.status(400).json({ error: 'recipient email required' });
+
+    if (!process.env.RESEND_API_KEY)
+      return res.status(503).json({ error: 'Email is not configured (RESEND_API_KEY missing)' });
+
+    const entries = (db.entries.get(session.id) || []).sort((a, b) => a.sequence - b.sequence);
+    const pdfBuffer = await collectPdfBuffer(session, entries);
+
+    const resend = new Resend(process.env.RESEND_API_KEY);
+    const from = process.env.RESEND_FROM || 'Live Translator Pro <onboarding@resend.dev>';
+    const subject = `Transcript: ${session.title}`;
+    const text = `Your transcript from "${session.title}" is attached.\n\n` +
+                 `Session ID: ${session.id}\n` +
+                 `Created: ${session.created_at}\n` +
+                 `Segments: ${entries.filter((e) => !e.event_type).length}\n`;
+
+    const { data, error } = await resend.emails.send({
+      from, to, subject, text,
+      attachments: [{
+        filename: `session-${session.id}.pdf`,
+        content:  pdfBuffer.toString('base64'),
+      }],
+    });
+    if (error) return res.status(502).json({ error: error.message || 'Email send failed' });
+    res.json({ ok: true, id: data?.id, to });
+  } catch (err) {
+    console.error('[/api/sessions/:id/email-pdf]', err);
+    res.status(500).json({ error: err.message });
   }
-  doc.end();
 });
 
 // ─── Start ──────────────────────────────────────────────────────────────────

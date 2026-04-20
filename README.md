@@ -1,7 +1,7 @@
 # Live Translator Pro — Independent Stack
 
-Real-time bilingual translation (EN ⟷ AR) with word-by-word streaming.
-**No Base44. No proprietary BaaS.** Runs entirely on your own infrastructure.
+Real-time **English → Arabic** translation with word-by-word streaming.
+**No proprietary BaaS.** Runs entirely on your own infrastructure.
 
 ---
 
@@ -22,18 +22,15 @@ Real-time bilingual translation (EN ⟷ AR) with word-by-word streaming.
 │  /api/auth/*          JWT + bcrypt                   │
 │  /api/sessions/*      In-memory store (swap → DB)    │
 │  /api/transcribe      OpenAI Whisper-1               │
-│  /api/translate       DeepL (EN→AR) / Google (AR→EN) │
+│  /api/translate       DeepL (EN → AR only)           │
 │  /api/sessions/:id/export-pdf   PDFKit               │
 │  WebSocket /ws        Rooms by sessionId             │
 └──────────────────────────────────────────────────────┘
 ```
 
-### Translation Routing (Hybrid Logic)
-| Direction | Engine        | Reason                          |
-|-----------|---------------|---------------------------------|
-| EN → AR   | **DeepL**     | Best formal Arabic output       |
-| AR → EN   | **Google** (DeepL fallback) | Better Arabic source handling |
-| Other     | **Google** (DeepL fallback) | General language pairs  |
+### Translation
+Only **English → Arabic** is supported. Whisper transcribes; DeepL translates.
+Non-English audio is transcribed but not translated.
 
 ---
 
@@ -41,10 +38,9 @@ Real-time bilingual translation (EN ⟷ AR) with word-by-word streaming.
 
 ### 1. Clone & install
 ```bash
-git clone https://github.com/your-username/live-translator-pro.git
+git clone https://github.com/knowarabic-bit/live-translator-pro.git
 cd live-translator-pro
-cd server && npm install && cd ..
-cd client && npm install && cd ..
+npm install        # installs root + client + server workspaces
 ```
 
 ### 2. Configure environment variables
@@ -53,7 +49,6 @@ cd client && npm install && cd ..
 ```env
 OPENAI_API_KEY=sk-...
 DEEPL_API_KEY=...          # ends with :fx for the free plan
-GOOGLE_API_KEY=AIza...
 JWT_SECRET=change-me-to-a-long-random-string
 PORT=4000
 CLIENT_ORIGIN=http://localhost:5173
@@ -66,12 +61,14 @@ VITE_WS_URL=ws://localhost:4000
 ```
 
 ### 3. Run in development
+From the repo root:
 ```bash
-# Terminal 1
-cd server && npm run dev
-
-# Terminal 2
-cd client && npm run dev
+npm run dev        # starts server (4000) + client (5173) in parallel
+```
+…or run them separately:
+```bash
+npm run dev --workspace=server
+npm run dev --workspace=client
 ```
 Open **http://localhost:5173**
 
@@ -83,7 +80,6 @@ Open **http://localhost:5173**
 |------------------|-----------------|
 | OPENAI_API_KEY   | https://platform.openai.com/api-keys |
 | DEEPL_API_KEY    | https://www.deepl.com/pro-api (500k chars/month free) |
-| GOOGLE_API_KEY   | https://console.cloud.google.com → Cloud Translation API |
 
 ---
 
@@ -126,7 +122,7 @@ live-translator-pro/
 │
 └── client/
     ├── src/
-    │   ├── api/api.js              ← HTTP + WebSocket client (replaces base44)
+    │   ├── api/api.js              ← HTTP + WebSocket client
     │   ├── lib/AuthContext.jsx     ← JWT auth context
     │   ├── pages/
     │   │   ├── AuthPage.jsx        ← Login / Register

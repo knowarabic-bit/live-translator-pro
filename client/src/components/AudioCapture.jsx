@@ -68,8 +68,14 @@ export default function AudioCapture({ sessionId, onEntry, isHost }) {
         return;
       }
 
+      // ── EN → AR only: skip anything that isn't English ───────────────────
+      if (detectedLang !== 'en') {
+        setStatus('listening');
+        return;
+      }
+
       // ── OPTIMISTIC: show original immediately ────────────────────────────
-      const targetLang = detectedLang === 'ar' ? 'en' : 'ar';
+      const targetLang = 'ar';
       sequenceRef.current += 1;
       const seq = sequenceRef.current;
 
@@ -78,7 +84,7 @@ export default function AudioCapture({ sessionId, onEntry, isHost }) {
         session_id:        sessionId,
         original_text:     text,
         translated_text:   null,     // null = "Translating…" spinner
-        detected_language: detectedLang,
+        detected_language: 'en',
         target_language:   targetLang,
         speaker_email:     user?.email,
         sequence:          seq,
@@ -86,15 +92,15 @@ export default function AudioCapture({ sessionId, onEntry, isHost }) {
       onEntry(optimistic);
       setStatus('listening');       // unblock UI before translate round-trip
 
-      // 2. Translate in background
-      const tlRes = await translate(text, detectedLang, targetLang);
+      // 2. Translate in background (EN → AR via DeepL)
+      const tlRes = await translate(text, 'en', targetLang);
       const { translated_text, detected_language: confirmedLang } = tlRes;
 
       // Persist to server (triggers WS broadcast to other participants)
       const realEntry = await entriesApi.create(sessionId, {
         original_text:     text,
         translated_text:   translated_text || '',
-        detected_language: confirmedLang || detectedLang,
+        detected_language: confirmedLang || 'en',
         target_language:   targetLang,
         speaker_email:     user?.email,
         sequence:          seq,

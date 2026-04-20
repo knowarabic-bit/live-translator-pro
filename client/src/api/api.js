@@ -1,6 +1,6 @@
 /**
- * api.js — thin HTTP + WebSocket client for live-translator-pro
- * Replaces the @base44/sdk completely.
+ * api.js — thin HTTP + WebSocket client for live-translator-pro.
+ * Talks to the Express server under /api and a WebSocket at /ws.
  */
 
 const BASE = import.meta.env.VITE_API_URL || '';
@@ -41,6 +41,22 @@ export const sessions = {
   get:    (id)   => request(`/api/sessions/${id}`),
   update: (id, data) => request(`/api/sessions/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   join:   (code) => request('/api/sessions/join', { method: 'POST', body: JSON.stringify({ access_code: code }) }),
+  emailPdf: (id, to) =>
+    request(`/api/sessions/${id}/email-pdf`, { method: 'POST', body: JSON.stringify({ to }) }),
+};
+
+// ─── Public (guest) access by code ───────────────────────────────────────────
+export const publicSessions = {
+  getByCode: (code) => fetch(`${BASE}/api/public/sessions/by-code/${encodeURIComponent(code)}`)
+    .then(async (r) => {
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+      return r.json();
+    }),
+  entries: (id, code) => fetch(`${BASE}/api/public/sessions/${id}/entries?code=${encodeURIComponent(code)}`)
+    .then(async (r) => {
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+      return r.json();
+    }),
 };
 
 // ─── Entries ─────────────────────────────────────────────────────────────────
@@ -69,13 +85,16 @@ export async function exportPdf(sessionId) {
 
 // ─── WebSocket subscription ───────────────────────────────────────────────────
 /**
- * subscribe(sessionId, onMessage) → unsub function
- * onMessage receives parsed JSON: { type, data }
+ * subscribe(sessionId, onMessage, { code? }) → unsub function
+ * Pass `code` to authenticate as a guest (no token). onMessage receives parsed
+ * JSON: { type, data }.
  */
-export function subscribe(sessionId, onMessage) {
+export function subscribe(sessionId, onMessage, opts = {}) {
   const token = getToken();
-  const url   = `${WS_BASE}/ws?token=${encodeURIComponent(token)}&sessionId=${encodeURIComponent(sessionId)}`;
-  const ws    = new WebSocket(url);
+  const qs    = new URLSearchParams({ sessionId });
+  if (opts.code) qs.set('code', opts.code);
+  else if (token) qs.set('token', token);
+  const ws = new WebSocket(`${WS_BASE}/ws?${qs.toString()}`);
 
   ws.onmessage = (e) => {
     try { onMessage(JSON.parse(e.data)); } catch { /* ignore parse errors */ }

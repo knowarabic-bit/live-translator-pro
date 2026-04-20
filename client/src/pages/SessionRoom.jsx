@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/lib/AuthContext';
 import { sessions, entries as entriesApi, exportPdf, subscribe } from '@/api/api';
 import {
-  ArrowLeft, Copy, Check, Users, StopCircle, Download, Loader2,
+  ArrowLeft, Copy, Check, Users, StopCircle, Download, Loader2, Mail, Share2,
 } from 'lucide-react';
 import ConversationFeed from '../components/ConversationFeed';
 import AudioCapture    from '../components/AudioCapture';
@@ -15,8 +15,11 @@ export default function SessionRoom() {
   const [session,   setSession]   = useState(null);
   const [entries,   setEntries]   = useState([]);
   const [copied,    setCopied]    = useState(false);
+  const [linkCopied, setLinkCopied] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [ending,    setEnding]    = useState(false);
+  const [emailing,  setEmailing]  = useState(false);
+  const [emailMsg,  setEmailMsg]  = useState('');
 
   // ── Unified entry merge: handles optimistic, replace, and WS broadcasts ──
   const mergeEntry = useCallback((entry) => {
@@ -50,6 +53,17 @@ export default function SessionRoom() {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const shareUrl = session
+    ? `${window.location.origin}/s/${session.access_code}`
+    : '';
+
+  const copyShareLink = () => {
+    if (!shareUrl) return;
+    navigator.clipboard.writeText(shareUrl);
+    setLinkCopied(true);
+    setTimeout(() => setLinkCopied(false), 2000);
+  };
+
   const endSession = async () => {
     setEnding(true);
     try {
@@ -57,6 +71,20 @@ export default function SessionRoom() {
       setSession(updated);
     } finally {
       setEnding(false);
+    }
+  };
+
+  const emailTranscript = async () => {
+    setEmailing(true);
+    setEmailMsg('');
+    try {
+      const to = user?.email;
+      await sessions.emailPdf(id, to);
+      setEmailMsg(`Sent to ${to}`);
+    } catch (err) {
+      setEmailMsg(err.message);
+    } finally {
+      setEmailing(false);
     }
   };
 
@@ -120,14 +148,40 @@ export default function SessionRoom() {
         {/* Controls */}
         <div className="flex items-center gap-3">
           {session.status === 'active' && (
+            <>
+              <button
+                onClick={copyCode}
+                title="Copy access code"
+                className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 hover:border-slate-600 text-slate-300 text-sm transition-all"
+              >
+                {copied
+                  ? <Check className="w-4 h-4 text-green-400" />
+                  : <Copy  className="w-4 h-4" />}
+                <span className="font-mono tracking-wider">{session.access_code}</span>
+              </button>
+              <button
+                onClick={copyShareLink}
+                title="Copy public share link"
+                className="flex items-center gap-2 px-3 py-2 rounded-xl bg-cyan-500/10 border border-cyan-500/30 hover:border-cyan-400 text-cyan-300 text-sm transition-all"
+              >
+                {linkCopied
+                  ? <Check className="w-4 h-4 text-green-400" />
+                  : <Share2 className="w-4 h-4" />}
+                {linkCopied ? 'Link copied' : 'Share link'}
+              </button>
+            </>
+          )}
+
+          {isHost && session.status === 'ended' && (
             <button
-              onClick={copyCode}
-              className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 hover:border-slate-600 text-slate-300 text-sm transition-all"
+              onClick={emailTranscript}
+              disabled={emailing || entries.length === 0}
+              className="flex items-center gap-2 px-3 py-2 rounded-xl bg-violet-500/10 border border-violet-500/30 hover:border-violet-400 text-violet-300 text-sm transition-all disabled:opacity-40"
             >
-              {copied
-                ? <Check className="w-4 h-4 text-green-400" />
-                : <Copy  className="w-4 h-4" />}
-              <span className="font-mono tracking-wider">{session.access_code}</span>
+              {emailing
+                ? <Loader2 className="w-4 h-4 animate-spin" />
+                : <Mail className="w-4 h-4" />}
+              Email PDF
             </button>
           )}
 
@@ -169,6 +223,16 @@ export default function SessionRoom() {
         </div>
       )}
 
+      {/* ── End-of-session banner ────────────────────────────────────────── */}
+      {isHost && session.status === 'ended' && (
+        <div className="px-6 py-3 bg-slate-900/50 border-b border-slate-800/50 flex items-center justify-between">
+          <span className="text-slate-300 text-sm">
+            Session ended — email the transcript as a PDF to <span className="text-violet-300">{user?.email}</span>?
+          </span>
+          {emailMsg && <span className="text-xs text-slate-400">{emailMsg}</span>}
+        </div>
+      )}
+
       {/* ── Conversation feed ────────────────────────────────────────────── */}
       <div className="flex-1 px-6 pt-6 pb-4">
         <ConversationFeed entries={entries} />
@@ -180,7 +244,7 @@ export default function SessionRoom() {
           {entries.filter(e => !e.event_type).length} segments transcribed
         </span>
         <span className="text-slate-600 text-xs">
-          EN ⟷ AR · Whisper + DeepL / Google
+          EN → AR · Whisper + DeepL
         </span>
       </div>
     </div>
